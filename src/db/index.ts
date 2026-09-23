@@ -8,10 +8,11 @@ import fs from 'fs';
 
 let dbInstance: any = null;
 let rawClient: any = null;
+let initPromise: Promise<void> | null = null;
 
-export async function getDb() {
+function initClients() {
   if (dbInstance) {
-    return { db: dbInstance, client: rawClient };
+    return;
   }
 
   const databaseUrl = process.env.DATABASE_URL;
@@ -25,7 +26,7 @@ export async function getDb() {
     });
     rawClient = pool;
     dbInstance = drizzlePg(pool, { schema });
-    return { db: dbInstance, client: rawClient };
+    return;
   }
 
   // Local development / fallback zero-config embedded PostgreSQL
@@ -37,13 +38,47 @@ export async function getDb() {
   const pglite = new PGlite(dbDir);
   rawClient = pglite;
   dbInstance = drizzle(pglite, { schema });
+}
 
+export async function getDb() {
+  initClients();
+
+  if (!initPromise) {
+    initPromise = (async () => {
+      try {
+        let hasProducts = false;
+        try {
+          const checkRes = await executeSql(`SELECT COUNT(*)::int AS count FROM products;`);
+          const count = parseInt(checkRes.rows?.[0]?.count || '0', 10);
+          if (count > 0) {
+            hasProducts = true;
+          }
+        } catch {
+          hasProducts = false;
+        }
+
+        if (!hasProducts) {
+          console.log('⚡ Auto-migrating and seeding CakeCart database...');
+          const { runMigrations } = await import('./migrate');
+          const { runSeed } = await import('./seed');
+          await runMigrations();
+          await runSeed();
+          console.log('⚡ CakeCart database ready!');
+        }
+      } catch (err) {
+        console.error('Database auto-initialization error:', err);
+      }
+    })();
+  }
+
+  await initPromise;
   return { db: dbInstance, client: rawClient };
 }
 
 // Helper to run raw SQL script or query across both PGlite and pg.Pool
 export async function executeSql(queryText: string, params: any[] = []): Promise<{ rows: any[] }> {
-  const { client } = await getDb();
+  initClients();
+  const client = rawClient;
   if ('query' in client) {
     try {
       const result = await client.query(queryText, params);
@@ -60,6 +95,7 @@ export async function executeSql(queryText: string, params: any[] = []): Promise
         }
         return { rows: (execRes as any)?.rows || [] };
       }
+      throw err;
     }
   }
   throw new Error('Unsupported database client');
