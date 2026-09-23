@@ -9,6 +9,7 @@ import fs from 'fs';
 let dbInstance: any = null;
 let rawClient: any = null;
 let initPromise: Promise<void> | null = null;
+let isMigrating = false;
 
 function initClients() {
   if (dbInstance) {
@@ -40,15 +41,17 @@ function initClients() {
   dbInstance = drizzle(pglite, { schema });
 }
 
-export async function getDb() {
+export async function ensureDatabaseInitialized() {
   initClients();
+  if (isMigrating) return;
 
   if (!initPromise) {
     initPromise = (async () => {
+      isMigrating = true;
       try {
         let hasProducts = false;
         try {
-          const checkRes = await executeSql(`SELECT COUNT(*)::int AS count FROM products;`);
+          const checkRes = await rawClient.query(`SELECT COUNT(*)::int AS count FROM products;`);
           const count = parseInt(checkRes.rows?.[0]?.count || '0', 10);
           if (count > 0) {
             hasProducts = true;
@@ -67,17 +70,23 @@ export async function getDb() {
         }
       } catch (err) {
         console.error('Database auto-initialization error:', err);
+      } finally {
+        isMigrating = false;
       }
     })();
   }
 
   await initPromise;
+}
+
+export async function getDb() {
+  await ensureDatabaseInitialized();
   return { db: dbInstance, client: rawClient };
 }
 
 // Helper to run raw SQL script or query across both PGlite and pg.Pool
 export async function executeSql(queryText: string, params: any[] = []): Promise<{ rows: any[] }> {
-  initClients();
+  await ensureDatabaseInitialized();
   const client = rawClient;
   if ('query' in client) {
     try {
